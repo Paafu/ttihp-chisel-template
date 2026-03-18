@@ -1,0 +1,28 @@
+[
+  {
+    "class":"firrtl.transforms.DedupedResult",
+    "original":"~ChiselTop|DS1050PWMAdapter",
+    "duplicate":"~ChiselTop|ChiselTop/ds_left:DS1050PWMAdapter",
+    "index":0.42857142857142855
+  },
+  {
+    "class":"firrtl.transforms.DedupedResult",
+    "original":"~ChiselTop|DS1050PWMAdapter_1",
+    "duplicate":"~ChiselTop|ChiselTop/ds_right:DS1050PWMAdapter",
+    "index":0.5714285714285714
+  },
+  {
+    "class":"firrtl.transforms.DedupedResult",
+    "original":"~ChiselTop|DS1050PWMAdapter_2",
+    "duplicate":"~ChiselTop|ChiselTop/ds_rudder:DS1050PWMAdapter",
+    "index":0.7142857142857143
+  },
+  {
+    "class":"firrtl.EmitCircuitAnnotation",
+    "emitter":"firrtl.VerilogEmitter"
+  },
+  {
+    "class":"firrtl.transforms.BlackBoxTargetDirAnno",
+    "targetDir":"src"
+  }
+]
