@@ -1,5 +1,8 @@
+import chisel3.DontCare.:=
 import chisel3._
 import chisel3.util._
+
+import scala.Byte.MaxValue
 
 class ChiselTop extends Module {
   val io = IO(new Bundle {
@@ -10,114 +13,105 @@ class ChiselTop extends Module {
     val uio_oe  = Output(UInt(8.W))  // Bidirectional output enable
   })
 
-  // ============================================================
-  // Input mapping
-  // ui_in[3:0] = pilot pitch command  (-8 .. +7)
-  // ui_in[7:4] = pilot roll command   (-8 .. +7)
-  //
-  // uio_in[3:0] = pitch correction from external IMU controller (-8 .. +7)
-  // uio_in[7:4] = roll correction from external IMU controller  (-8 .. +7)
-  //
-  // Outputs:
-  // uo_out[0] = left elevon servo PWM
-  // uo_out[1] = right elevon servo PWM
-  // uo_out[7:2] = debug/status bits
-  // ============================================================
 
-  // Treat 4-bit fields as signed two's complement
-  val pilotPitch = io.ui_in(3, 0).asSInt
-  val pilotRoll  = io.ui_in(7, 4).asSInt
-  val corrPitch  = io.uio_in(3, 0).asSInt
-  val corrRoll   = io.uio_in(7, 4).asSInt
+  // Instantiate DebounceInit for each input
+  val debounce_up_command = Module(new DebounceInit)
+  debounce_up_command.io.d := io.ui_in(0)
 
-  // Gain on correction path: divide by 2 to keep things tame
-  val corrPitchScaled = (corrPitch.asSInt >> 1).asSInt
-  val corrRollScaled  = (corrRoll.asSInt >> 1).asSInt
+  val debounce_down_command = Module(new DebounceInit)
+  debounce_down_command.io.d := io.ui_in(1)
 
-  val totalPitch = (pilotPitch +& corrPitchScaled).asSInt
-  val totalRoll  = (pilotRoll  +& corrRollScaled).asSInt
+  val debounce_down_end_command = Module(new DebounceInit)
+  debounce_down_end_command.io.d := io.ui_in(2)
 
-  // Delta wing elevon mixing:
-  // left  = pitch + roll
-  // right = pitch - roll
-  val leftMixRaw  = (totalPitch +& totalRoll).asSInt
-  val rightMixRaw = (totalPitch -& totalRoll).asSInt
+  val debounce_up_end_command = Module(new DebounceInit)
+  debounce_up_end_command.io.d := io.ui_in(3)
 
-  // Saturate to signed 5-bit range we want to use: -8 .. +7
-  def sat4(x: SInt): SInt = {
-    val y = Wire(SInt(4.W))
-    when(x > 7.S) {
-      y := 7.S
-    }.elsewhen(x < (-8).S) {
-      y := (-8).S
-    }.otherwise {
-      y := x(3, 0).asSInt
-    }
-    y
-  }
+  val debounce_down_sensor = Module(new DebounceInit)
+  debounce_down_sensor.io.d := io.ui_in(4)
 
-  val leftMix  = sat4(leftMixRaw)
-  val rightMix = sat4(rightMixRaw)
+  val debounce_up_sensor = Module(new DebounceInit)
+  debounce_up_sensor.io.d := io.ui_in(5)
 
-  // ============================================================
-  // Servo PWM generator
-  // 50 MHz clock
-  // 20 ms period  = 1,000,000 cycles
-  // 1.0 ms pulse  =   50,000 cycles
-  // 1.5 ms pulse  =   75,000 cycles
-  // 2.0 ms pulse  =  100,000 cycles
-  //
-  // command range: -8 .. +7
-  // map to pulse width around center
-  // step = 3,000 cycles (~60 us)
-  // so:
-  // -8 -> 51,000
-  //  0 -> 75,000
-  // +7 -> 96,000
-  // ============================================================
+  // Instantiate ManualAutoControl and connect debounced signals
+  val manual_auto_control = Module(new ManualAutoControl)
+  manual_auto_control.io.up_command := debounce_up_command.io.output
+  manual_auto_control.io.down_command := debounce_down_command.io.output
+  manual_auto_control.io.down_end_command := debounce_down_end_command.io.output
+  manual_auto_control.io.up_end_command := debounce_up_end_command.io.output
+  manual_auto_control.io.down_sensor := debounce_down_sensor.io.output
+  manual_auto_control.io.up_sensor := debounce_up_sensor.io.output
 
-  val periodCount = 1000000.U(20.W)
-  val pwmCounter  = RegInit(0.U(20.W))
+  // Connect outputs
+  io.uo_out(0) := manual_auto_control.io.motor_up
+  io.uo_out(1) := manual_auto_control.io.motor_down
 
-  when(pwmCounter === (periodCount - 1.U)) {
-    pwmCounter := 0.U
-  }.otherwise {
-    pwmCounter := pwmCounter + 1.U
-  }
-
-  def servoPulseWidth(cmd: SInt): UInt = {
-    val center = 75000.S(18.W)
-    val step   = 3000.S(18.W)
-    val width  = center + (cmd * step)
-    width.asUInt
-  }
-
-  val leftPulse  = servoPulseWidth(leftMix)
-  val rightPulse = servoPulseWidth(rightMix)
-
-  val leftPwm  = pwmCounter < leftPulse
-  val rightPwm = pwmCounter < rightPulse
-
-  // ============================================================
-  // Outputs
-  // ============================================================
-
-  io.uo_out := Cat(
-    0.U(1.W),                // bit 7 reserved
-    leftMix.asUInt()(3),     // bit 6 debug
-    leftMix.asUInt()(2),     // bit 5 debug
-    rightMix.asUInt()(3),    // bit 4 debug
-    rightMix.asUInt()(2),    // bit 3 debug
-    (pwmCounter === 0.U),    // bit 2 frame sync pulse
-    rightPwm,                // bit 1
-    leftPwm                  // bit 0
-  )
-
-  // We are only using uio as inputs in this version
-  io.uio_out := 0.U
-  io.uio_oe  := 0.U
 }
 
 object ChiselTop extends App {
   emitVerilog(new ChiselTop(), Array("--target-dir", "src"))
+}
+
+class DebounceInit extends Module {
+  val io = IO(new Bundle {
+    val d: UInt = Input(UInt (1.W))
+    val output: UInt = Output(UInt (1.W))
+  })
+  //Double D-flip flop
+  val q = RegNext(io.d)
+  val qq  = RegNext(q)
+  // AND GATE
+  val output = q & qq
+  io.output := output
+}
+
+class ManualAutoControl extends Module {
+  val io = IO(new Bundle {
+    // Input
+    val up_command: UInt  = Input(UInt (1.W))
+    val down_command: UInt  = Input(UInt (1.W))
+    val down_end_command: UInt = Input(UInt (1.W))
+    val up_end_command: UInt = Input(UInt (1.W))
+    val down_sensor: UInt = Input(UInt (1.W))
+    val up_sensor: UInt = Input(UInt (1.W))
+
+    //
+    val motor_up: UInt = Output(UInt (1.W))
+    val motor_down: UInt = Output(UInt (1.W))
+  })
+
+  val not_0: UInt = (~io.down_command).asUInt
+  val not_1: UInt = (~io.up_command).asUInt
+
+  val and_0: UInt = not_0 & io.down_command
+  val and_1: UInt = io.down_command & not_1
+
+  val nand_0: UInt = (~(io.down_end_command & io.up_end_command)).asUInt
+  val not_2: UInt = (~io.down_end_command).asUInt
+  val not_3: UInt = (~io.up_end_command).asUInt
+  val and_2: UInt = not_2 & nand_0
+  val and_3: UInt = nand_0 & not_3
+
+  val and_4: UInt = not_0 & not_1
+
+  //
+
+  val and_0_0: UInt = and_0 & and_2
+  val and_0_1: UInt = and_1 & and_3
+
+  //
+
+  val and_5: UInt = and_4 & io.down_sensor
+  val and_6: UInt = and_4 & io.up_sensor
+
+  //
+
+  val or_0: UInt = and_0_0 | and_5
+  val or_1: UInt = and_0_1 | and_6
+
+  // Output
+
+  io.motor_up := or_0
+  io.motor_down := or_1
+
 }
